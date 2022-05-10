@@ -112,7 +112,10 @@ def skewness(r):
     # use the population standard deviation, so set dof=0
     sigma_r = r.std(ddof=0)
     exp = (demeaned_r**3).mean()
-    return exp/sigma_r**3
+    try:
+        return exp/sigma_r**3
+    except:
+        return np.nan
 
 
 def kurtosis(r):
@@ -125,7 +128,10 @@ def kurtosis(r):
     # use the population standard deviation, so set dof=0
     sigma_r = r.std(ddof=0)
     exp = (demeaned_r**4).mean()
-    return exp/sigma_r**4
+    try:
+        return exp/sigma_r**4
+    except:
+        return np.nan
 
 
 def compound(r):
@@ -267,6 +273,13 @@ def portfolio_return(weights, returns):
     """
     return weights.T @ returns
 
+def portfolio_esg(weights, esg):
+    """
+    Computes the esg on a portfolio from constituent returns and weights
+    weights are a numpy array or Nx1 matrix and returns are a numpy array or Nx1 matrix
+    """
+    return weights.T @ esg
+
 
 def portfolio_vol(weights, covmat):
     """
@@ -318,6 +331,29 @@ def minimize_vol(target_return, er, cov):
                        bounds=bounds)
     return weights.x
 
+def minimize_vol_esg(target_esg, esg, cov):
+    """
+    Returns the optimal weights that achieve the target return
+    given a set of expected returns and a covariance matrix
+    """
+    n = esg.shape[0]
+    init_guess = np.repeat(1/n, n)
+    bounds = ((0.0, 1.0),) * n # an N-tuple of 2-tuples!
+    # construct the constraints
+    weights_sum_to_1 = {'type': 'eq',
+                        'fun': lambda weights: np.sum(weights) - 1
+    }
+    esg_is_target = {'type': 'ineq',
+                        'args': (esg,),
+                        'fun': lambda weights, esg: portfolio_esg(weights,esg) - target_esg
+    }
+    weights = minimize(portfolio_vol, init_guess,
+                       args=(cov,), method='SLSQP',
+                       options={'disp': False},
+                       constraints=(weights_sum_to_1,esg_is_target),
+                       bounds=bounds)
+    return weights.x
+
 
 def tracking_error(r_a, r_b):
     """
@@ -326,7 +362,7 @@ def tracking_error(r_a, r_b):
     return np.sqrt(((r_a - r_b)**2).sum())
 
                          
-def msr(riskfree_rate, er, cov):
+def msr(riskfree_rate, er, cov, esg):
     """
     Returns the weights of the portfolio that gives you the maximum sharpe ratio
     given the riskfree rate and expected returns and a covariance matrix
@@ -351,6 +387,38 @@ def msr(riskfree_rate, er, cov):
                        args=(riskfree_rate, er, cov), method='SLSQP',
                        options={'disp': False},
                        constraints=(weights_sum_to_1,),
+                       bounds=bounds)
+    return weights.x
+
+def msr_esg(riskfree_rate, er, cov, esg, target_esg):
+    """
+    Returns the weights of the portfolio that gives you the maximum sharpe ratio
+    given the riskfree rate and expected returns and a covariance matrix
+    """
+    n = er.shape[0]
+    init_guess = np.repeat(1/n, n)
+    bounds = ((0.0, 1.0),) * n # an N-tuple of 2-tuples!
+    # construct the constraints
+    weights_sum_to_1 = {'type': 'eq',
+                        'fun': lambda weights: np.sum(weights) - 1
+    }
+    esg_is_target = {'type': 'ineq',
+                        'args': (esg,),
+                        'fun': lambda weights, esg: portfolio_esg(weights,esg) - target_esg
+    }
+    def neg_sharpe(weights, riskfree_rate, er, cov):
+        """
+        Returns the negative of the sharpe ratio
+        of the given portfolio
+        """
+        r = portfolio_return(weights, er)
+        vol = portfolio_vol(weights, cov)
+        return -(r - riskfree_rate)/vol
+    
+    weights = minimize(neg_sharpe, init_guess,
+                       args=(riskfree_rate, er, cov), method='SLSQP',
+                       options={'disp': False},
+                       constraints=(weights_sum_to_1,esg_is_target),
                        bounds=bounds)
     return weights.x
 
@@ -473,13 +541,13 @@ def run_cppi(risky_r, safe_r=None, m=3, start=1000, floor=0.8, riskfree_rate=0.0
     return backtest_result
 
 
-def summary_stats(r, riskfree_rate=0.03):
+def summary_stats(r, riskfree_rate, periods_per_year):
     """
     Return a DataFrame that contains aggregated summary stats for the returns in the columns of r
     """
-    ann_r = r.aggregate(annualize_rets, periods_per_year=12)
-    ann_vol = r.aggregate(annualize_vol, periods_per_year=12)
-    ann_sr = r.aggregate(sharpe_ratio, riskfree_rate=riskfree_rate, periods_per_year=12)
+    ann_r = r.aggregate(annualize_rets, 0, periods_per_year)
+    ann_vol = r.aggregate(annualize_vol, 0, periods_per_year)
+    ann_sr = r.aggregate(sharpe_ratio, 0, riskfree_rate=riskfree_rate, periods_per_year=periods_per_year)
     dd = r.aggregate(lambda r: drawdown(r).Drawdown.min())
     skew = r.aggregate(skewness)
     kurt = r.aggregate(kurtosis)
@@ -712,7 +780,7 @@ def weight_erc(r, cov_estimator=sample_cov, **kwargs):
     est_cov = cov_estimator(r, **kwargs)
     return equal_risk_contributions(est_cov)
 
-def implied_returns(delta=2.5, sigma, w):
+def implied_returns(delta, sigma, w):
     """
     Obtain the implied expected returns by reverse engineering the weights
     Inputs:
